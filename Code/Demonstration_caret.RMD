@@ -1,0 +1,316 @@
+---
+title: "Demonstration of Caret Package for Implementation of Supervised Machine Learning"
+author: "JAS"
+date: "July 12, 2021 "
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Overview of the Caret Package
+
+The caret package (Classification And REgression Training) contains a number of functions to streamline the process for creating analytic pipelines for prediction. It calls to other libraries to run algorithms, but provides a seamless and uniform interface for working with different algorithms.
+
+Primary functionalities of caret include:
+
+* pre-processing
+* data splitting
+* feature selection
+* model tuning using resampling
+* variable importance estimation
+
+***
+
+Helpful resources using caret:
+
+Max Kuhn's explainer of the caret package
+https://topepo.github.io/caret/model-training-and-tuning.html
+
+Kuhn M. Building predictive models in R using the caret package. Journal of Statistical Software 2008;28(5) doi: 10.18637/jss.v028.i05
+
+Webinar, given by Max Kuhn, available on YouTube (~1 hour): https://www.youtube.com/watch?v=7Jbb2ItbTC4
+
+***
+
+### Description of Data Used during Demonstration
+
+Data Source: UCI Machine Learning Repository, HCV data Dataset
+
+The dataset contains laboratory values of blood donors (control) and Hepatitis C patients with varying levels of liver damage. Created by Lichtinghagen, Klawonn and Hoffmann. Lichtinghagen R et al. J Hepatol 2013; 59: 236-42
+
+
+Attribute Information:
+
+All attributes except Category and Sex are numerical. The laboratory data are the attributes 5-14.
+1) X (Patient ID/No.)
+2) Category (diagnosis) (values: '0=Blood Donor', '0s=suspect Blood Donor', '1=Hepatitis', '2=Fibrosis', '3=Cirrhosis')
+3) Age (in years)
+4) Sex (f,m)
+5) ALB
+6) ALP
+7) ALT
+8) AST
+9) BIL
+10) CHE
+11) CHOL
+12) CREA
+13) GGT
+14) PROT
+
+Research question: Can we distinguish individuals with Hepatitis C (with or without more severe liver damage) from blood donors?
+(Source: Kaggle https://www.kaggle.com/fedesoriano/hepatitis-c-dataset/code)
+***
+
+### Loading Packages and Data Cleaning
+
+
+```{r dataprep}
+library(tidyverse)
+library(caret)
+library(stats)
+
+#Read in data on liver function study
+set.seed(111)
+
+hcvdat0<-read.csv("Data/hcvdat0.csv")
+
+#Make outcome category a factor var
+hcvdat0$Category<-as.factor(hcvdat0$Category)
+
+#Collapse factor levels of outcome variable
+hcvdat0$outcome.class<-fct_collapse(hcvdat0$Category, NED=c("0=Blood Donor","0s=suspect Blood Donor"), LiverDisease=c("1=Hepatitis", "2=Fibrosis", "3=Cirrhosis"))
+
+#Drop category and ID variable and remove missings
+hcvdat0$Category<-NULL
+hcvdat0$X<-NULL
+hcvdat0<-na.omit(hcvdat0)
+```
+
+### Examples of pre-processing functions
+
+Caret contains a number of pre-processing functions that can be helpful as you implement your analytic pipeline. These functions can be used in combination (and sometimes within) caret functions intended for training a model or can be implemented separately before using another R package. Below is code for identifying highly correlated features, centering and scaling numeric data and partitioning data.
+
+```{r preprocess}
+
+#Finding correlated predictors
+hcvdat.numeric<- hcvdat0 %>% dplyr::select(where(is.numeric))
+correlations<-cor(hcvdat.numeric, use="complete.obs")
+high.correlations<-findCorrelation(correlations, cutoff=0.4)
+
+#Centering and Scaling
+set.up.preprocess<-preProcess(hcvdat.numeric, method=c("center", "scale"))
+#Output pre-processed values
+transformed.vals<-predict(set.up.preprocess, hcvdat.numeric)
+
+#Creating balanced partitions in the data
+train.index<-createDataPartition(hcvdat0$outcome.class, p=0.7, list=FALSE)
+
+hcvdat.train<-hcvdat0[train.index,]
+hcvdat.test<-hcvdat0[-train.index,]
+
+#Construct k-folds in your data
+train.folds<-createFolds(hcvdat0$outcome.class, k=10, list=FALSE)
+```
+### Model Training and Tuning
+
+Caret primarily uses the train function to implement the training of the model, including tuning hyperparameters.
+
+```{r models}
+
+#See what caret can do!
+names(getModelInfo())
+
+modelLookup("rpart")
+modelLookup("adaboost")
+
+#Train Function: used for tuning of hyperparameters and choosing "optimal" model
+
+#Use trainControl Function to set validation method and options (default is bootstrap)
+
+#Perform 10-fold cross-validation
+control.settings<-trainControl(method="cv", number=10)
+
+#Perform repeated 10-fold cross-validation
+control.settings.b<-trainControl(method="repeatedcv", number=10, repeats=10)
+
+#Perform sampling to balance data
+control.settings.c<-trainControl(method="repeatedcv", number=10, repeats=10, sampling="down")
+
+#Train function can be used to implement different algorithms using method=
+
+#Demonstration of LASSO Algorithm using glmnet
+
+#modelLookup will specify hyperparameters
+
+modelLookup("glmnet")
+
+set.seed(123)
+
+lasso <- train(
+ outcome.class ~., data = hcvdat.train, method = "glmnet", preProc=c("center", "scale"),
+  trControl = control.settings.c)
+
+lasso$results
+
+#Don't depend on defaults for hyperparameters. Add tuning grid for lambda and alpha (but set alpha to 1 for LASSO)
+lambda<-10^seq(-3,1, length=100)
+lambda.grid<-expand.grid(alpha=1, lambda=lambda)
+
+#Incorporate tuneGrid into train function 
+set.seed(123)
+lasso.2 <- train(
+ outcome.class ~., data = hcvdat.train, method = "glmnet",preProc=c("center", "scale"),
+  trControl = control.settings.c, tuneGrid = lambda.grid)
+
+
+#Use plot to visualize tuning
+plot(lasso.2)
+
+#summaryFunction will allow calculation of sensitivity and specificity, classProbs= TRUE will allow the calculation of predicted probabilities
+
+control.settings.d<-trainControl(method="repeatedcv", number=10, repeats=5, sampling="down", classProbs = TRUE, summaryFunction = twoClassSummary)
+
+#Incorporate tuneGrid into train function and change evaluation metric to area under ROC curve
+set.seed(123)
+lasso.3 <- train(
+ outcome.class ~., data = hcvdat.train, method = "glmnet",preProc=c("center", "scale"),
+  trControl = control.settings.d, tuneGrid = lambda.grid, metric="ROC")
+  
+lasso.3$bestTune
+
+#The tolerance function could be used to find a less complex model based on (x-xbest)/xbestx 100, which is #the percent difference. For example, to select parameter values based on a 2% loss of performance. Similar function (oneSE) would find optimal tuning within 1 standard error. Use of these functions is to avoid overfitting.
+
+whichTwoPct <- tolerance(lasso.3$results, metric = "ROC", 
+                         tol = 2, maximize = TRUE) 
+
+lasso.3$results[whichTwoPct,1:6]
+
+
+```
+
+### Model Evaluation
+
+Caret has built in functions to evaluate the performance of your model.
+
+```{r evaluate}
+
+test.outcome<-predict(lasso.3, hcvdat.test)
+
+confusionMatrix(test.outcome, hcvdat.test$outcome, positive="LiverDisease")
+```
+
+
+## Example: Classification and Regression Trees using Caret
+
+Yu et al utilized NHANES data from 1999-2004 to predict diabetes and pre-diabetes using Support Vector Machines. We will conduct a similar analysis using the caret package and classification trees. We will use data within the NHANES package in R. For this exercise, you will try to predict Diabetes using similar (although not all) variables. The available data is also slightly different, so you likely won't get the same answers.
+
+We will restrict the NHANES data to the list of 11 variables below, and partition the data into training and testing using a 70/30 split.
+
+"Age", "Race1", "Education", "HHIncome", "Weight", "Height", "Pulse", "Diabetes", "BMI", "PhysActive", "Smoke100"
+
+We will build a pipeline to predict diabetes using a classification tree. We will optimize our  model using cross-validation to choose hyperparameters in the training data. We will calculate final accuracy in a test set.
+
+***
+
+
+```{r data_prep}
+library(tidyverse)
+library(NHANES)
+library(caret)
+library(pROC)
+library(e1071)
+library(rpart.plot)
+
+
+set.seed(100)
+#Tidyverse way
+#data = NHANES %>% select("Age", "Gender", "Race1", "Education", "HHIncome", "Weight", "Height", "Pulse", "Diabetes", "BMI", "PhysActive", "Smoke100")
+
+data ("NHANES")
+
+keep.var<-names(NHANES) %in% c("Age", "Race1", "Education", "HHIncome", "Weight", "Height", "Pulse", "Diabetes", "BMI", "PhysActive", "Smoke100")
+NHANES.subset<-NHANES[keep.var]
+
+str(NHANES.subset)
+#Remove missings
+NHANES.subset<-na.omit(NHANES.subset)
+
+#Check balance of data ..... uh oh
+summary(NHANES.subset$Diabetes)
+
+
+#Partition data
+set.seed(100)
+training.indices.2<-NHANES.subset$Diabetes%>% createDataPartition(p=0.7, list=F)
+train.data.2<-NHANES.subset[training.indices.2, ]
+test.data.2<-NHANES.subset[-training.indices.2, ]
+
+
+```
+
+Classification Tree while accounting for imbalanced data
+
+```{r cartmodel}
+set.seed(100)
+tctrl <- trainControl(method = "cv", 
+                     number = 10, 
+                     verboseIter = FALSE,
+                     sampling = "down")
+
+cp = 10^seq(-3, -1, length = 100) 
+
+ model.tree<- train(Diabetes~.,
+        data = train.data.2,
+        method = "rpart",
+        trControl = tctrl,
+        tuneGrid = expand.grid(cp = cp)
+  )
+
+ ggplot(model.tree)
+ 
+model.tree$bestTune
+
+#Obtain variable importance metrics
+varImp(model.tree) 
+
+#Visualize the tree
+rpart.plot(model.tree$finalModel)
+
+#Estimate accuracy in the training data
+confusionMatrix(model.tree)
+
+#Estimate accuracy in the testing data
+pred_diab<-predict(model.tree, test.data.2)
+pred_diab_prob<- predict(model.tree, test.data.2, type = "prob")
+
+confusionMatrix(pred_diab, test.data.2$Diabetes, positive = "Yes")
+
+analysis <- roc(response=test.data.2$Diabetes, predictor=pred_diab_prob[,2])
+plot(1-analysis$specificities,analysis$sensitivities,type="l",
+ylab="Sensitiviy",xlab="1-Specificity",col="black",lwd=2,
+main = "ROC Curve for Diabetes Prediction")
+abline(a=0,b=1)
+
+## Using Area under the ROC curve to choose optimal model
+set.seed(100)
+control.settings.roc<-trainControl(method="cv", number=10, sampling="down", classProbs = TRUE, summaryFunction = twoClassSummary)
+model.tree.roc<- train(Diabetes~.,
+        data = train.data.2,
+        method = "rpart",
+        trControl = control.settings.roc,
+        tuneGrid = expand.grid(cp = cp),
+        metric="ROC"
+  )
+
+model.tree.roc$results
+
+pred_diab.2<-predict(model.tree.roc, test.data.2)
+confusionMatrix(pred_diab.2, test.data.2$Diabetes, positive="Yes")
+
+```
+
+
+
